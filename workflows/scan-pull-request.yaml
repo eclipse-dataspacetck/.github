@@ -1,0 +1,91 @@
+#
+#  Copyright (c) 2026 Think-it GmbH
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License, Version 2.0 which is available at
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+#
+#  Contributors:
+#    Think-it GmbH - initial API and implementation
+#
+
+---
+name: Scan Pull Request
+
+# Reusable workflow: the central source of truth for PR checks across the org.
+# Each repository calls it from a thin caller workflow (see README) so that the
+# logic below is maintained in a single place.
+on:
+  workflow_call:
+    inputs:
+      allowed_labels:
+        description: 'Comma-separated list of labels, at least one of which must be set on the PR'
+        required: false
+        type: string
+        default: 'api,bug,build,dependencies,documentation,enhancement,no-changelog,refactoring'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-pull-request-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title follows Conventional Commits
+        # The title is passed through the environment (never interpolated into the
+        # script body) to avoid shell injection via crafted PR titles.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/)
+          # Online check: https://regex101.com/r/V5J8kh/1
+          #
+          # Valid:   fix: resolve minor issue
+          #          docs(Sample5): update docs for configuration
+          #          feat(management-api)!: change path to access contract agreements
+          # Invalid: Add cool feature
+          #          Feature/some cool improvement
+          #          fix: resolve minor issue.   (trailing dot)
+          regex='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\(\w+((,|/|\\)?\s?\w+)+\))?!?: [\S ]{1,80}[^.]$'
+
+          if printf '%s' "$PR_TITLE" | grep -Pq "$regex"; then
+            echo "✓ PR title conforms to Conventional Commits: $PR_TITLE"
+          else
+            echo "::error::PR title does not follow the Conventional Commits spec: '$PR_TITLE'"
+            echo "Expected format: <type>(<optional scope>)<optional !>: <description>"
+            echo "Allowed types:   build, chore, ci, docs, feat, fix, perf, refactor, revert, style, test"
+            echo "The description must be 1-80 chars and must not end with a '.'"
+            exit 1
+          fi
+
+  check-for-assigned-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR has at least one required label
+        # Labels are passed as a JSON array through the environment and parsed with jq.
+        env:
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          ALLOWED_LABELS: ${{ inputs.allowed_labels }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t current < <(jq -r '.[]' <<< "$PR_LABELS")
+          IFS=',' read -ra wanted <<< "$ALLOWED_LABELS"
+
+          for label in "${current[@]:-}"; do
+            for want in "${wanted[@]}"; do
+              if [ "$label" = "$want" ]; then
+                echo "✓ Found required label: $label"
+                exit 0
+              fi
+            done
+          done
+
+          echo "::error::Pull request must carry at least one of these labels: $ALLOWED_LABELS"
+          echo "Current labels: ${current[*]:-<none>}"
+          exit 1
